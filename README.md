@@ -2,7 +2,7 @@
 
 An evolving society simulation with autonomous agents, homeostatic needs, memory, learning, families, hierarchy, construction, cultural knowledge, written archives, daily shelter routines, and nocturnal wildlife.
 
-People calculate when they must leave work to reach shelter before sunset, sleep indoors overnight, and return outside after dawn. Crocodiles emerge from shoreline dens at night, hunt exposed people, and retreat to the water during daylight.
+People calculate when they must leave work to reach shelter before sunset, sleep indoors overnight, and return outside after dawn. Crocodiles emerge from shoreline dens at 10:00 PM, hunt exposed people until 4:00 AM, and then retreat to the water.
 
 ## Development
 

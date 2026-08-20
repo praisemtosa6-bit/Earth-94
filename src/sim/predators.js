@@ -1,9 +1,11 @@
 import { WORLD_SIZE } from './constants'
-import { getDayProgress, isNightTime } from './lifecycle'
+import { getDayProgress } from './lifecycle'
 import { getTileAt } from './world'
 import { getAgentName } from './names'
 
 export const CROCODILE_COUNT = 3
+export const CROCODILE_EMERGENCE_HOUR = 22
+export const CROCODILE_RETREAT_HOUR = 4
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 const distanceBetween = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y))
@@ -17,6 +19,12 @@ const DIRECTIONS = [
   [0, -1],
   [1, -1],
 ]
+
+export const isCrocodileActiveTime = (tick, calendar) => {
+  const dayProgress = getDayProgress(tick, calendar)
+  const minuteOfDay = Math.floor(dayProgress * 24 * 60 + 1e-7)
+  return minuteOfDay >= CROCODILE_EMERGENCE_HOUR * 60 || minuteOfDay < CROCODILE_RETREAT_HOUR * 60
+}
 
 const adjacentTiles = (world, tile, type) => {
   const matches = []
@@ -151,8 +159,8 @@ const retreatToWater = (predator, world) => {
 }
 
 export const runPredators = (predators, agents, world, tick, calendar) => {
-  const night = isNightTime(tick, calendar)
-  const wasNight = isNightTime(tick - 1, calendar)
+  const active = isCrocodileActiveTime(tick, calendar)
+  const wasActive = isCrocodileActiveTime(tick - 1, calendar)
   const nextAgents = agents.map((agent) => ({
     ...agent,
     chemistry: { ...agent.chemistry },
@@ -164,7 +172,7 @@ export const runPredators = (predators, agents, world, tick, calendar) => {
   const claimedTargets = new Set()
 
   const nextPredators = normalizePredators(predators, world).map((original, index) => {
-    if (!night) return retreatToWater(original, world)
+    if (!active) return retreatToWater(original, world)
 
     const exposed = nextAgents
       .filter((agent) => agent.health > 0 && !agent.indoors)
@@ -206,15 +214,15 @@ export const runPredators = (predators, agents, world, tick, calendar) => {
     return predator
   })
 
-  if (night && !wasNight) events.unshift(`Tick ${tick}: Night fell and ${nextPredators.length} crocodiles emerged from the water`)
-  if (!night && wasNight) events.unshift(`Tick ${tick}: Dawn broke and the crocodiles retreated toward the water`)
+  if (active && !wasActive) events.unshift(`Tick ${tick}: At 10 PM, ${nextPredators.length} crocodiles emerged from the water`)
+  if (!active && wasActive) events.unshift(`Tick ${tick}: At 4 AM, the crocodiles began retreating to the water`)
 
   return {
     predators: nextPredators,
     agents: nextAgents.map((agent) => byId.get(agent.id) ?? agent),
     events,
     attacks,
-    night,
+    active,
     dayProgress: getDayProgress(tick, calendar),
   }
 }
