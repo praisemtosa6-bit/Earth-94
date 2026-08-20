@@ -1,6 +1,6 @@
 # Earth 94 persistence contract
 
-Earth 94 always saves a complete, versioned world snapshot in the browser. In a deployed build, set `VITE_WORLD_API_URL` to also synchronize that snapshot with a persistent database through the API below.
+Earth 94 stores one authoritative, versioned world snapshot in Neon Postgres. The deployed Vite client talks to the same-origin Vercel API at `/api`; browser storage is only a local recovery cache.
 
 ## Storage model
 
@@ -19,14 +19,14 @@ The snapshot includes agents, names, genealogy, life stages, the synchronized ca
 
 ### Load the continuing world
 
-`GET /worlds/:worldId`
+`GET /api/worlds/:worldId`
 
 - Return `200` with either the snapshot directly or `{ "snapshot": <snapshot> }`.
 - Return `404` when the world has not been created yet.
 
 ### Atomically save the world
 
-`PUT /worlds/:worldId`
+`PUT /api/worlds/:worldId`
 
 Request:
 
@@ -55,7 +55,9 @@ When another client saved first, return `409` with the current database snapshot
 { "snapshot": { "version": 6, "revision": 13 } }
 ```
 
-This prevents an older browser tab from silently overwriting a newer world. Authentication and write authorization should be enforced by the API, not embedded in Vite environment variables.
+This prevents an older browser tab from silently overwriting a newer world. Every request also carries a per-tab client ID. The API grants a short renewable controller lease to one browser: that browser advances and saves the simulation, while all other browsers poll and display the authoritative snapshot. If the controller disappears, an observing browser can claim the expired lease and continue the world.
+
+`DATABASE_URL` is server-only. It must be configured in Vercel and must never use the `VITE_` prefix.
 
 ## A world that runs while nobody is watching
 

@@ -11,7 +11,9 @@ npm install
 npm run dev
 ```
 
-The simulation saves automatically in the browser. To connect a deployed build to a shared persistent world, copy `.env.example`, set `VITE_WORLD_API_URL`, and implement the small versioned API described in [PERSISTENCE.md](./PERSISTENCE.md).
+The deployed simulation uses the same-origin Vercel API and Neon Postgres as one shared, persistent world. One browser owns a short simulation lease while other browsers spectate the same database snapshot; ownership transfers automatically when the active browser leaves. Browser storage remains only as a recovery cache.
+
+For local development, copy `.env.example` and provide `DATABASE_URL` through a Vercel-compatible development environment. See [PERSISTENCE.md](./PERSISTENCE.md) for the synchronization model.
 
 ## Checks
 

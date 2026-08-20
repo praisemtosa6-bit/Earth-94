@@ -5,6 +5,7 @@ import { create3DRenderer } from './sim/renderer3d'
 import { forgetThought, getKnowledgeScore, getMemoryStats, implantThought } from './sim/brain'
 import {
   clearSimulation,
+  getPersistenceClientId,
   isRemotePersistenceConfigured,
   loadRemoteSimulation,
   loadSimulation,
@@ -19,6 +20,8 @@ function App() {
   const rendererRef = useRef(null)
   const stateRef = useRef(null)
   const selectedAgentIdRef = useRef(null)
+  const hasWorldControlRef = useRef(!isRemotePersistenceConfigured())
+  const syncInFlightRef = useRef(false)
   const formatSimTime = (tick, calendar) => {
     const elapsedYears = getElapsedWorldYears(tick, calendar)
     const completedYears = Math.floor(elapsedYears)
@@ -55,6 +58,7 @@ function App() {
   const [persistenceStatus, setPersistenceStatus] = useState(
     () => isRemotePersistenceConfigured() ? 'connecting' : 'local',
   )
+  const [hasWorldControl, setHasWorldControl] = useState(() => !isRemotePersistenceConfigured())
 
   const selectedAgent = useMemo(
     () => state.agents.find((agent) => agent.id === selectedAgentId) ?? null,
@@ -114,30 +118,87 @@ function App() {
   useEffect(() => {
     stateRef.current = state
     selectedAgentIdRef.current = selectedAgentId
-  }, [state, selectedAgentId])
+    hasWorldControlRef.current = hasWorldControl
+  }, [state, selectedAgentId, hasWorldControl])
 
   useEffect(() => {
     if (!isRemotePersistenceConfigured()) return undefined
     let active = true
+    let timer
+    const clientId = getPersistenceClientId()
 
-    loadRemoteSimulation(stateRef.current?.worldId)
-      .then((remoteState) => {
-        if (!active) return
-        const localState = stateRef.current
-        const remoteIsNewer = remoteState && (
-          remoteState.tick > (localState?.tick ?? -1)
-          || (remoteState.tick === localState?.tick && remoteState.revision > (localState?.revision ?? 0))
-        )
-        if (remoteIsNewer) setState(remoteState)
+    const scheduleNextSync = () => {
+      if (active) timer = window.setTimeout(synchronizeWorld, 4_000)
+    }
+
+    const acceptRemote = (remote) => {
+      if (!remote?.state) return
+      setState(remote.state)
+      setHasWorldControl(remote.isController === true)
+      setPersistenceStatus(remote.isController ? 'connected' : 'spectating')
+    }
+
+    const attemptControl = async (candidateState) => {
+      const result = await saveRemoteSimulation(candidateState, clientId)
+      if (result.status === 'saved') {
+        setState((current) => ({ ...current, revision: result.revision }))
+        setHasWorldControl(true)
         setPersistenceStatus('connected')
-      })
-      .catch((error) => {
-        console.warn('Could not connect to the Earth 94 world database.', error)
-        if (active) setPersistenceStatus('offline')
-      })
+        return
+      }
+      if (result.state) {
+        acceptRemote({
+          state: result.state,
+          isController: result.isController,
+          leaseExpiresAt: result.leaseExpiresAt,
+        })
+      }
+    }
+
+    async function synchronizeWorld() {
+      if (!active || syncInFlightRef.current) return scheduleNextSync()
+      syncInFlightRef.current = true
+      try {
+        if (hasWorldControlRef.current) {
+          setPersistenceStatus('syncing')
+          const result = await saveRemoteSimulation(stateRef.current, clientId)
+          if (!active) return
+          if (result.status === 'saved') {
+            setState((current) => ({ ...current, revision: result.revision }))
+            setHasWorldControl(true)
+            setPersistenceStatus('connected')
+          } else if (result.state) {
+            acceptRemote({ state: result.state, isController: result.isController })
+          }
+        } else {
+          setPersistenceStatus('connecting')
+          const remote = await loadRemoteSimulation(stateRef.current?.worldId, clientId)
+          if (!active) return
+          if (!remote) {
+            await attemptControl(stateRef.current)
+          } else {
+            acceptRemote(remote)
+            const leaseExpired = !remote.leaseExpiresAt || Date.parse(remote.leaseExpiresAt) <= Date.now()
+            if (!remote.isController && leaseExpired) await attemptControl(remote.state)
+          }
+        }
+      } catch (error) {
+        console.warn('Could not synchronize the Earth 94 world database.', error)
+        if (active) {
+          setHasWorldControl(false)
+          setPersistenceStatus('offline')
+        }
+      } finally {
+        syncInFlightRef.current = false
+        scheduleNextSync()
+      }
+    }
+
+    synchronizeWorld()
 
     return () => {
       active = false
+      window.clearTimeout(timer)
     }
   }, [])
 
@@ -156,7 +217,7 @@ function App() {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      if (!isRunning) {
+      if (!isRunning || !hasWorldControl) {
         return
       }
       setState((prev) => {
@@ -165,35 +226,15 @@ function App() {
       })
     }, Math.max(30, Math.round(1000 / ticksPerSecond)))
     return () => clearInterval(timer)
-  }, [isRunning, ticksPerSecond])
+  }, [hasWorldControl, isRunning, ticksPerSecond])
 
-  // Persist the learned world periodically and once more when the page closes.
+  // Keep a local recovery cache; the database synchronization loop owns remote saves.
   useEffect(() => {
     if (state.tick === 0 || state.tick % 40 !== 0) return undefined
-    const timer = window.setTimeout(async () => {
+    const timer = window.setTimeout(() => {
       const latestState = stateRef.current
       if (!latestState) return
       saveSimulation(latestState)
-      if (!isRemotePersistenceConfigured()) return
-
-      setPersistenceStatus('syncing')
-      try {
-        const result = await saveRemoteSimulation(latestState)
-        if (result.status === 'saved') {
-          setState((current) => ({
-            ...current,
-            revision: Math.max(current.revision ?? 0, result.revision ?? 0),
-          }))
-        } else if (result.status === 'conflict' && result.state) {
-          setState((current) => result.state.tick >= current.tick
-            ? result.state
-            : { ...current, revision: result.state.revision })
-        }
-        setPersistenceStatus('connected')
-      } catch (error) {
-        console.warn('Could not sync the Earth 94 world database.', error)
-        setPersistenceStatus('offline')
-      }
     }, 0)
     return () => window.clearTimeout(timer)
   }, [state.tick])
@@ -238,7 +279,7 @@ function App() {
   }, [state, selectedAgentId, previewPath])
 
   const injectFood = () => {
-    if (!selectedAgentId) {
+    if (!hasWorldControl || !selectedAgentId) {
       return
     }
     setState((prev) => ({
@@ -252,7 +293,7 @@ function App() {
   }
 
   const boostTrait = (trait, delta) => {
-    if (!selectedAgentId) {
+    if (!hasWorldControl || !selectedAgentId) {
       return
     }
     setState((prev) => ({
@@ -268,7 +309,7 @@ function App() {
 
   const implantSelectedThought = () => {
     const text = thoughtDraft.trim()
-    if (!selectedAgentId || !text) return
+    if (!hasWorldControl || !selectedAgentId || !text) return
     setState((prev) => ({
       ...prev,
       agents: prev.agents.map((agent) =>
@@ -286,7 +327,7 @@ function App() {
   }
 
   const forgetSelectedThought = (thoughtId) => {
-    if (!selectedAgentId) return
+    if (!hasWorldControl || !selectedAgentId) return
     setState((prev) => ({
       ...prev,
       agents: prev.agents.map((agent) =>
@@ -296,6 +337,7 @@ function App() {
   }
 
   const triggerDrought = () => {
+    if (!hasWorldControl) return
     setState((prev) => ({
       ...prev,
       world: prev.world.map((tile) => ({ ...tile, richness: Math.max(0.05, tile.richness * 0.45) })),
@@ -304,6 +346,7 @@ function App() {
   }
 
   const startNewWorld = () => {
+    if (!hasWorldControl) return
     clearSimulation()
     setSelectedAgentId(null)
     setSelectedArtifactId(null)
@@ -326,13 +369,16 @@ function App() {
   const openBids = openOrders.filter((order) => order.side === 'bid').length
   const openAsks = openOrders.filter((order) => order.side === 'ask').length
   const recentTransactions = (economy.transactions ?? []).filter((transaction) => transaction.type === 'sold').slice(-3).reverse()
+  const isWorldAdvancing = isRunning && hasWorldControl
 
   return (
     <main className="civ-shell">
       <header className="top-hud">
         <div className="brand-block">
           <div className="hud-title">EARTH 94</div>
-          <span className={isRunning ? 'live-indicator active' : 'live-indicator'}>{isRunning ? 'LIVE' : 'PAUSED'}</span>
+          <span className={isWorldAdvancing ? 'live-indicator active' : 'live-indicator'}>
+            {!hasWorldControl ? 'SPECTATING' : isRunning ? 'LIVE' : 'PAUSED'}
+          </span>
           <span
             className={`persistence-indicator ${persistenceStatus}`}
             title={persistenceStatus === 'local' ? 'Saved in this browser' : `World database: ${persistenceStatus}`}
@@ -341,6 +387,7 @@ function App() {
             {persistenceStatus === 'connecting' && 'DB…'}
             {persistenceStatus === 'syncing' && 'SAVING…'}
             {persistenceStatus === 'connected' && 'DB SAVED'}
+            {persistenceStatus === 'spectating' && 'SHARED WORLD'}
             {persistenceStatus === 'offline' && 'DB OFFLINE'}
           </span>
         </div>
@@ -349,8 +396,8 @@ function App() {
           <span>{simTime.time} · Tick {state.tick}</span>
         </div>
         <div className="top-controls">
-          <button onClick={() => setIsRunning((value) => !value)}>{isRunning ? 'Pause' : 'Resume'}</button>
-          <button onClick={() => setState((prev) => runTick(prev))} disabled={isRunning}>Step</button>
+          <button onClick={() => setIsRunning((value) => !value)} disabled={!hasWorldControl}>{isRunning ? 'Pause' : 'Resume'}</button>
+          <button onClick={() => setState((prev) => runTick(prev))} disabled={isRunning || !hasWorldControl}>Step</button>
           <label className="speed-control">
             <span>{ticksPerSecond} tps</span>
             <input
@@ -360,9 +407,10 @@ function App() {
               max="30"
               value={ticksPerSecond}
               onChange={(event) => setTicksPerSecond(Number(event.target.value))}
+              disabled={!hasWorldControl}
             />
           </label>
-          <button className="quiet-button" onClick={startNewWorld}>New World</button>
+          <button className="quiet-button" onClick={startNewWorld} disabled={!hasWorldControl}>New World</button>
         </div>
       </header>
 

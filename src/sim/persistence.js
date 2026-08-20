@@ -7,10 +7,31 @@ import { SubstrateManager } from './substrateManager'
 import { ensureCoastalEconomy, removeRoads } from './world'
 
 const STORAGE_KEY = 'earth-94-simulation-v1'
+const CLIENT_ID_KEY = 'earth-94-client-id'
 const SNAPSHOT_VERSION = 7
 const DEFAULT_WORLD_ID = 'earth-94-main'
 
-const getRemoteBaseUrl = () => (import.meta.env.VITE_WORLD_API_URL ?? '').trim().replace(/\/$/, '')
+const getRemoteBaseUrl = () => {
+  const configuredUrl = (import.meta.env.VITE_WORLD_API_URL ?? '').trim()
+  if (configuredUrl) return configuredUrl.replace(/\/$/, '')
+  return import.meta.env.PROD ? '/api' : ''
+}
+
+let fallbackClientId
+
+export const getPersistenceClientId = () => {
+  if (typeof window === 'undefined') return 'server-renderer'
+  try {
+    const existing = window.sessionStorage.getItem(CLIENT_ID_KEY)
+    if (existing) return existing
+    const created = window.crypto?.randomUUID?.() ?? `earth-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    window.sessionStorage.setItem(CLIENT_ID_KEY, created)
+    return created
+  } catch {
+    fallbackClientId ??= `earth-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    return fallbackClientId
+  }
+}
 
 export const isRemotePersistenceConfigured = () => Boolean(getRemoteBaseUrl())
 
@@ -103,20 +124,28 @@ export const loadSimulation = () => {
   }
 }
 
-export const loadRemoteSimulation = async (worldId = DEFAULT_WORLD_ID) => {
+export const loadRemoteSimulation = async (worldId = DEFAULT_WORLD_ID, clientId = getPersistenceClientId()) => {
   const baseUrl = getRemoteBaseUrl()
   if (!baseUrl) return null
   const response = await fetch(`${baseUrl}/worlds/${encodeURIComponent(worldId)}`, {
-    headers: { Accept: 'application/json' },
+    headers: {
+      Accept: 'application/json',
+      'X-Earth-Client-Id': clientId,
+    },
     cache: 'no-store',
   })
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`World load failed with status ${response.status}`)
   const payload = await response.json()
-  return hydrateSnapshot(payload.snapshot ?? payload)
+  const state = hydrateSnapshot(payload.snapshot ?? payload)
+  return state ? {
+    state,
+    isController: payload.isController === true,
+    leaseExpiresAt: payload.leaseExpiresAt ?? null,
+  } : null
 }
 
-export const saveRemoteSimulation = async (state) => {
+export const saveRemoteSimulation = async (state, clientId = getPersistenceClientId()) => {
   const baseUrl = getRemoteBaseUrl()
   if (!baseUrl) return { status: 'local' }
   const snapshot = createSnapshot(state)
@@ -125,6 +154,7 @@ export const saveRemoteSimulation = async (state) => {
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
+      'X-Earth-Client-Id': clientId,
     },
     body: JSON.stringify({
       expectedRevision: snapshot.revision,
@@ -132,16 +162,20 @@ export const saveRemoteSimulation = async (state) => {
     }),
   })
   const payload = response.status === 204 ? {} : await response.json().catch(() => ({}))
-  if (response.status === 409) {
+  if (response.status === 409 || response.status === 423) {
     return {
       status: 'conflict',
       state: hydrateSnapshot(payload.snapshot ?? payload.currentSnapshot),
+      isController: payload.isController === true,
+      leaseExpiresAt: payload.leaseExpiresAt ?? null,
     }
   }
   if (!response.ok) throw new Error(`World save failed with status ${response.status}`)
   return {
     status: 'saved',
     revision: payload.revision ?? snapshot.revision + 1,
+    isController: payload.isController !== false,
+    leaseExpiresAt: payload.leaseExpiresAt ?? null,
   }
 }
 
